@@ -13,4 +13,4 @@ test-results/
 playwright-report/
 logs/
 downloads/
-play/
+/play/
