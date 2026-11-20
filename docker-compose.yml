@@ -1,0 +1,170 @@
+name: cinevault
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    # Fixed name: scripts/up.sh builds it with `docker build` (as up.ps1 had to
+    # on Windows, where Compose's Bake builder failed); `docker compose up
+    # --build` works too on Linux.
+    image: cinevault-api
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MEDIA_ROOT: /media
+      CACHE_DIR: /cache
+      METADATA_LANGUAGE: ${METADATA_LANGUAGE:-nl-NL}
+      SCAN_ON_STARTUP: ${SCAN_ON_STARTUP:-false}
+      SCAN_INTERVAL_MINUTES: ${SCAN_INTERVAL_MINUTES:-60}
+      # Skip Intro for anime: times from AniSkip (false = only chapters and audio).
+      ANISKIP: ${ANISKIP:-true}
+      # "Ontdekken": anime rows and searches from AniList (false = TMDB only).
+      ANILIST: ${ANILIST:-true}
+      PLEX_THEMES: ${PLEX_THEMES:-true}
+      ANIME_THEMES: ${ANIME_THEMES:-true}
+      THEMERRDB: ${THEMERRDB:-true}
+      # Picture subtitles (PGS) read as text (false = off).
+      SUBTITLE_OCR: ${SUBTITLE_OCR:-true}
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      OPENSUBTITLES_API_KEY: ${OPENSUBTITLES_API_KEY:-}
+      OPENSUBTITLES_USERNAME: ${OPENSUBTITLES_USERNAME:-}
+      OPENSUBTITLES_PASSWORD: ${OPENSUBTITLES_PASSWORD:-}
+      JWT_SECRET: ${JWT_SECRET:-}
+      API_TOKEN: ${API_TOKEN:-}
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
+      # Notifications: quiet hours and "airs today" in this time zone; the
+      # domain names the server in web push.
+      NOTIFY_TIMEZONE: ${NOTIFY_TIMEZONE:-Europe/Amsterdam}
+      # "Verzoeken": asked-for titles are added to Radarr and Sonarr.
+      RADARR_URL: ${RADARR_URL:-http://host.docker.internal:7878}
+      RADARR_API_KEY: ${RADARR_API_KEY:-}
+      SONARR_URL: ${SONARR_URL:-http://host.docker.internal:8989}
+      SONARR_API_KEY: ${SONARR_API_KEY:-}
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-}
+      # Transcoding runs in the transcoder container (below), which has the GPU
+      # and writes its segments to TRANSCODE_TMP. The API passes them on to the player.
+      TRANSCODER_URL: ${TRANSCODER_URL:-http://transcoder:8766}
+      CAST_BASE_URL: ${CAST_BASE_URL:-}
+      TRANSCODER_TOKEN: ${TRANSCODER_TOKEN:-}
+    extra_hosts:
+      # Radarr and Sonarr publish their ports on the host; Docker Engine on
+      # Linux only knows host.docker.internal with this line.
+      - 'host.docker.internal:host-gateway'
+    # Host path, e.g. /mnt/media.
+    volumes:
+      - ${MEDIA_ROOT:?set MEDIA_ROOT in .env}:/media:ro
+      # Downloaded posters and other things CineVault keeps itself.
+      - cache:/cache
+    # Only on the N100 itself (for the scripts): browsers and the app go through
+    # Caddy. API_BIND=0.0.0.0 opens it to the home network again.
+    ports:
+      - '${API_BIND:-127.0.0.1}:${API_PORT:-3000}:3000'
+    networks:
+      default:
+        # Caddy proxies to this name: unlike "api" it can't also belong to a
+        # container of another project on voqa-intern.
+        aliases: [cinevault-api]
+
+  transcoder:
+    # FFmpeg with Intel Quick Sync (QSV) for the API: HLS sessions, subtitles,
+    # intro search, preview pictures. Only the API talks to it (TRANSCODER_URL),
+    # over the compose network: its port is not published.
+    image: cinevault-transcoder
+    build:
+      context: .
+      dockerfile: apps/transcoder/Dockerfile
+    restart: unless-stopped
+    # Reaps FFmpeg processes that end while the transcoder runs.
+    init: true
+    devices:
+      # The Intel GPU (render node renderD128) for QSV.
+      - /dev/dri:/dev/dri
+    group_add:
+      # The host's render group may use /dev/dri/renderD128. Its number differs
+      # per machine: getent group render (scripts/up.sh fills it in). Without
+      # it: video (44); the entrypoint then adds the render node's group itself.
+      - '${RENDER_GID:-44}'
+    environment:
+      TRANSCODER_TOKEN: ${TRANSCODER_TOKEN:-}
+      # qsv: the GPU, falling back to the CPU when the self test fails; none: CPU only.
+      TRANSCODER_HWACCEL: ${TRANSCODER_HWACCEL:-qsv}
+      TRANSCODER_MAX_TRANSCODES: ${TRANSCODER_MAX_TRANSCODES:-2}
+      TRANSCODER_MAX_SESSIONS: ${TRANSCODER_MAX_SESSIONS:-6}
+      # 1 reads the media through a local HTTP server, needed on Windows so
+      # Sonarr and Radarr could delete files in use. Linux allows that anyway.
+      TRANSCODER_MEDIA_OVER_HTTP: ${TRANSCODER_MEDIA_OVER_HTTP:-0}
+      # Paths inside the container, the same as in the api container.
+      MEDIA_ROOT: /media
+      TRANSCODE_TMP: /transcode
+    volumes:
+      - ${MEDIA_ROOT:?set MEDIA_ROOT in .env}:/media:ro
+      # HLS segments; prefer an SSD. Emptied at every start of the transcoder.
+      - ${TRANSCODE_TMP:?set TRANSCODE_TMP in .env}:/transcode
+
+  web:
+    # Built by scripts/up.sh.
+    image: cinevault-web
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # PUBLIC_DOMAIN (e.g. cine-vault.nl) is served over HTTPS with a Let's Encrypt
+      # certificate. Without it, the Caddyfile's second site is a harmless localhost.
+      PUBLIC_SITE: ${PUBLIC_DOMAIN:-http://localhost:8765}
+    volumes:
+      # Certificates and the ACME account; keep them, Let's Encrypt limits new ones.
+      - caddy-data:/data
+      # The Android APKs at /tv and /android (scripts/build-apk.sh, scripts/get-apk.ps1).
+      - ./downloads:/downloads:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:8765/']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    # The web interface: http://<N100>:8765 at home, https://PUBLIC_DOMAIN outside.
+    # Forward 80 and 443 in the router to the N100 (docs/server-setup.md, step 20).
+    ports:
+      - '${WEB_PORT:-8765}:8765'
+      - '${HTTP_PORT:-80}:80'
+      - '${HTTPS_PORT:-443}:443'
+    networks:
+      - default
+      # Caddy also serves Voqa Social (n8n.voqa.nl, media.voqa.nl) and reaches
+      # its containers voqa-n8n and voqa-render over this network.
+      - voqa-intern
+
+networks:
+  # Made by the project voqa-social: start that one first (scripts/up.sh checks it).
+  voqa-intern:
+    external: true
+
+volumes:
+  pgdata:
+  cache:
+  caddy-data:

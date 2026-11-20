@@ -1,0 +1,20 @@
+packages:
+  - apps/*
+  - packages/*
+
+onlyBuiltDependencies:
+  - '@prisma/engines'
+  - esbuild
+  - prisma
+
+# react-native-google-cast's Expo config plugin requires @expo/config-plugins
+# without declaring it, which pnpm's strict node_modules don't allow.
+packageExtensions:
+  react-native-google-cast:
+    dependencies:
+      '@expo/config-plugins': 58.0.9
+
+# CineVault's guard in expo-video's media sessions: no play from outside the
+# app while the car drives (apps/mobile/modules/cinevault-media, DrivingGate).
+patchedDependencies:
+  expo-video@58.0.11: patches/expo-video@58.0.11.patch

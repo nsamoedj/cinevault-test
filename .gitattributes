@@ -1,0 +1,7 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Shell scripts and Dockerfiles run inside Linux containers: always LF,
+# also when checked out on Windows with core.autocrlf=true.
+*.sh text eol=lf
+Dockerfile text eol=lf

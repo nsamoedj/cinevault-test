@@ -1,0 +1,79 @@
+# Serves the web app and forwards /api to the API container, on two sites:
+#  - :8765, plain HTTP for the home network and Tailscale (published as WEB_PORT);
+#  - PUBLIC_DOMAIN (e.g. cine-vault.nl) over HTTPS on 443, with a Let's Encrypt
+#    certificate that Caddy gets and renews itself (port 80 for the challenge
+#    and the redirect to HTTPS). Certificates are kept in the caddy-data volume.
+{
+	admin off
+	servers {
+		# HTTP/3 would need UDP 443 forwarded as well; HTTP/1.1 and HTTP/2 are enough.
+		protocols h1 h2
+	}
+}
+
+(app) {
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		X-Frame-Options DENY
+		-Server
+	}
+
+	# The Android APKs, to install on a TV with the Downloader app
+	# (scripts/build-apk.sh puts them in downloads/ on the N100). Other files
+	# copied there (an .aab, a .zip) keep the type of their extension, so a
+	# phone doesn't save them as .apk.
+	redir /tv /download/CineVault-TV.apk
+	redir /android /download/CineVault.apk
+	handle_path /download/* {
+		root * /downloads
+		@apk path *.apk
+		header @apk Content-Type application/vnd.android.package-archive
+		@aab path *.aab
+		header @aab Content-Type application/octet-stream
+		file_server
+	}
+
+	handle /api/* {
+		# Streams media as it comes, including range requests for seeking.
+		# cinevault-api: the API's alias on CineVault's own network (docker-compose.yml).
+		reverse_proxy cinevault-api:3000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		root * /srv
+		encode zstd gzip
+		header /assets/* Cache-Control "public, max-age=31536000, immutable"
+		# The web push service worker: browsers must see a new version at once.
+		header /sw.js Cache-Control "no-cache"
+		# Client-side routes (/items/…, /play/…) all load index.html.
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+:8765 {
+	import app
+}
+
+# PUBLIC_SITE is PUBLIC_DOMAIN from .env (see docker-compose.yml). Without a
+# domain it is localhost on the home-network port, which adds nothing.
+{$PUBLIC_SITE:http://localhost:8765} {
+	header Strict-Transport-Security "max-age=31536000"
+	import app
+}
+
+# Voqa (project voqa-social): n8n en de publieke beelden van de render-service.
+# Bereikbaar via het Docker-netwerk voqa-intern (zie docker-compose.yml).
+n8n.voqa.nl {
+	reverse_proxy voqa-n8n:5678
+}
+
+media.voqa.nl {
+	handle /files/* {
+		reverse_proxy voqa-render:3000
+	}
+	respond 404
+}

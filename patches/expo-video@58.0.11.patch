@@ -1,0 +1,89 @@
+diff --git a/android/src/main/java/expo/modules/video/VideoGate.kt b/android/src/main/java/expo/modules/video/VideoGate.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..76c5ccb00b0933c82fc39a151d7c9433cb9ecba7
+--- /dev/null
++++ b/android/src/main/java/expo/modules/video/VideoGate.kt
+@@ -0,0 +1,52 @@
++package expo.modules.video
++
++import androidx.annotation.OptIn
++import androidx.media3.common.Player
++import androidx.media3.common.util.UnstableApi
++import androidx.media3.session.MediaSession
++import androidx.media3.session.SessionResult
++
++/**
++ * CineVault patch (patches/expo-video@58.0.11.patch): in a car, video only
++ * plays while it is parked. The media sessions of this module refuse play from
++ * outside the app (steering wheel, the car's media controls, the Assistant,
++ * the system's media controls) while the car drives.
++ *
++ * The state comes from CineVault's own module (nl.cinevault.media.DrivingGate,
++ * written by CinevaultMediaModule, which reads the car's UX restrictions).
++ * Through reflection, because this library doesn't depend on that module.
++ * Without that class (another app, a phone without the module) video is
++ * always allowed.
++ */
++internal object VideoGate {
++  private const val HOLDER = "nl.cinevault.media.DrivingGate"
++
++  private val field by lazy {
++    runCatching { Class.forName(HOLDER).getField("videoAllowed") }.getOrNull()
++  }
++
++  fun allowed(): Boolean = runCatching { field?.getBoolean(null) ?: true }.getOrDefault(true)
++
++  /**
++   * For MediaSession.Callback.onPlayerCommandRequest: refuses play/pause from
++   * a controller while video isn't allowed, and pauses the player. Null: no
++   * opinion, the callback goes on as usual.
++   */
++  @OptIn(UnstableApi::class)
++  fun refuse(session: MediaSession, playerCommand: Int): Int? {
++    if (playerCommand != Player.COMMAND_PLAY_PAUSE || allowed()) return null
++    session.player.pause()
++    return SessionResult.RESULT_ERROR_INVALID_STATE
++  }
++}
++
++/** The callback of the basic media session (before the playback service runs). */
++@OptIn(UnstableApi::class)
++internal class GatedMediaSessionCallback : MediaSession.Callback {
++  override fun onPlayerCommandRequest(
++    session: MediaSession,
++    controller: MediaSession.ControllerInfo,
++    playerCommand: Int
++  ): Int = VideoGate.refuse(session, playerCommand)
++    ?: super.onPlayerCommandRequest(session, controller, playerCommand)
++}
+diff --git a/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt b/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt
+index 1ca90e0c3dcfc78be3410c3a285e9aaf7987dfbf..93589f2e2bf6b420f35dd85aa55447fe59d018f7 100644
+--- a/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt
++++ b/android/src/main/java/expo/modules/video/playbackService/VideoMediaSessionCallback.kt
+@@ -37,6 +37,14 @@ class VideoMediaSessionCallback : MediaSession.Callback {
+     }
+   }
+ 
++  // CineVault: no play from outside the app while the car drives (VideoGate).
++  override fun onPlayerCommandRequest(
++    session: MediaSession,
++    controller: MediaSession.ControllerInfo,
++    playerCommand: Int
++  ): Int = expo.modules.video.VideoGate.refuse(session, playerCommand)
++    ?: super.onPlayerCommandRequest(session, controller, playerCommand)
++
+   override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, customCommand: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
+     when (customCommand.customAction) {
+       ExpoVideoPlaybackService.SEEK_FORWARD_COMMAND -> session.player.seekTo(session.player.currentPosition + ExpoVideoPlaybackService.SEEK_INTERVAL_MS)
+diff --git a/android/src/main/java/expo/modules/video/utils/MediaSessionUtils.kt b/android/src/main/java/expo/modules/video/utils/MediaSessionUtils.kt
+index b69e694682068239cf900dde9dd18c67188e8a75..0f93babadbf4e846412d5d349eb9cb17ca6bd0f0 100644
+--- a/android/src/main/java/expo/modules/video/utils/MediaSessionUtils.kt
++++ b/android/src/main/java/expo/modules/video/utils/MediaSessionUtils.kt
+@@ -10,5 +10,7 @@ import androidx.media3.session.MediaSession
+ internal fun buildBasicMediaSession(context: Context, player: ExoPlayer): MediaSession {
+   return MediaSession.Builder(context, player)
+     .setId("ExpoVideoBasicMediaSession_${player.hashCode()}")
++    // CineVault: no play from outside the app while the car drives (VideoGate).
++    .setCallback(expo.modules.video.GatedMediaSessionCallback())
+     .build()
+ }

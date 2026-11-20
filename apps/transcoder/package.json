@@ -1,0 +1,19 @@
+{
+  "name": "@cinevault/transcoder",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runs FFmpeg with Intel QSV for the API, in its own container (or natively on Windows); the API talks to it over HTTP.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@cinevault/shared": "workspace:*",
+    "vitest": "^4.0.0"
+  }
+}

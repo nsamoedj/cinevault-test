@@ -1,0 +1,88 @@
+# Smoke test of the release APK on an emulator (.github/workflows/android.yml,
+# job "smoke"), against the browser tests' API server (apps/web/e2e) with the
+# account tester / e2e-wachtwoord-123. 10.0.2.2 is the host as the emulator
+# sees it.
+appId: nl.cinevault.app
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible: "Verbinden met je server"
+    timeout: 180000
+- takeScreenshot: smoke-1-connect
+- tapOn: "Serveradres"
+- inputText: "10.0.2.2:3100"
+# On a small screen the keyboard covers the button.
+- hideKeyboard
+- tapOn: "Verbinden"
+- tapOn:
+    text: "Iemand anders"
+    optional: true
+- extendedWaitUntil:
+    visible: "Gebruikersnaam"
+    timeout: 60000
+- tapOn: "Gebruikersnaam"
+- inputText: "tester"
+- hideKeyboard
+- tapOn: "Wachtwoord"
+- inputText: "e2e-wachtwoord-123"
+- hideKeyboard
+# The button, not the heading "Inloggen" above the fields.
+- tapOn:
+    text: "Inloggen"
+    below: "Wachtwoord"
+- extendedWaitUntil:
+    visible: "Ontdekken"
+    timeout: 120000
+- waitForAnimationToEnd:
+    timeout: 15000
+- takeScreenshot: smoke-2-home
+- tapOn: "Ontdekken"
+- waitForAnimationToEnd:
+    timeout: 15000
+- takeScreenshot: smoke-3-discover
+- tapOn: "Bibliotheek"
+- waitForAnimationToEnd:
+    timeout: 10000
+- tapOn: "Profiel"
+- waitForAnimationToEnd:
+    timeout: 10000
+- takeScreenshot: smoke-4-profile
+# The calendar, and back.
+- scrollUntilVisible:
+    element: "Agenda"
+    direction: DOWN
+- tapOn: "Agenda"
+- extendedWaitUntil:
+    visible: "Agenda koppelen"
+    timeout: 30000
+- takeScreenshot: smoke-4-calendar
+- tapOn: "Agenda koppelen"
+- extendedWaitUntil:
+    visible: "Google Agenda"
+    timeout: 30000
+- takeScreenshot: smoke-4-calendar-connect
+- pressKey: back
+- scrollUntilVisible:
+    element: "Accounts"
+    direction: UP
+# Admins manage the household's accounts here.
+- tapOn: "Accounts"
+- extendedWaitUntil:
+    visible: "Toevoegen"
+    timeout: 30000
+- takeScreenshot: smoke-4-accounts
+- tapOn: "Toevoegen"
+- waitForAnimationToEnd:
+    timeout: 5000
+- takeScreenshot: smoke-4-accounts-new
+- pressKey: back
+# As on a phone that already has the app: starts logged in, on Home.
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible: "Ontdekken"
+    timeout: 120000
+- waitForAnimationToEnd:
+    timeout: 15000
+- takeScreenshot: smoke-5-restart

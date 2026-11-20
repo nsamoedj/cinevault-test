@@ -1,0 +1,170 @@
+# Builds the Android app (apps/mobile) as release APKs and publishes them as
+# the pre-release "android-latest", so that the newest ones are always at
+# https://github.com/<owner>/<repo>/releases/download/android-latest/CineVault.apk
+# https://github.com/<owner>/<repo>/releases/download/android-latest/CineVault-TV.apk
+#
+# Both are the same app (it shows its TV screens on a TV). CineVault.apk is
+# 64-bit only, for phones. CineVault-TV.apk also has 32-bit code: many TVs
+# and TV boxes (Chromecast with Google TV among them) run 32-bit Android even
+# on a 64-bit chip. The two build at the same time.
+#
+# Signing: with the repository secrets ANDROID_UPLOAD_KEYSTORE (base64),
+# ANDROID_UPLOAD_KEYSTORE_PASSWORD and ANDROID_UPLOAD_KEY_ALIAS the APK is
+# signed with CineVault's own key (made with scripts/android-key.ps1).
+# Without them it is signed with the template's debug key.
+#
+# The job "smoke" (android-smoke.yml) starts the app on an emulator, from an
+# x86 build of the same code (CineVault-x86.apk, not published); it
+# does not hold back the release.
+#
+# Only started by hand (Actions -> Android -> Run workflow): the APKs are
+# normally built on the N100 with scripts/build-apk.ps1, because a build here
+# costs about 100 of the private repository's monthly Actions minutes. The
+# build number is the number of commits, as in build-apk.ps1, so APKs from
+# either install over each other.
+
+name: Android
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      matrix:
+        include:
+          - variant: phone
+            file: CineVault.apk
+            abis: arm64-v8a
+          - variant: tv
+            file: CineVault-TV.apk
+            abis: armeabi-v7a,arm64-v8a
+          # Only for the smoke test: the emulators are x86. With the arm64 APK
+          # under ARM translation, React Native looks for its libraries in the
+          # wrong folder and stops.
+          - variant: smoke
+            file: CineVault-x86.apk
+            abis: x86_64,x86
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # All of the history: the build number is the number of commits.
+          fetch-depth: 0
+
+      - name: Build number
+        run: echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          # By default only the default branch writes the cache; the app is
+          # built from other branches too, and a build without it takes ~30 min.
+          cache-read-only: false
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Check
+        run: |
+          pnpm --filter @cinevault/shared build
+          pnpm --filter @cinevault/mobile typecheck
+          pnpm --filter @cinevault/mobile test
+
+      - name: Prebuild
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --platform android --no-install --clean
+
+      - name: Signing key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE }}
+          PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "::warning::No ANDROID_UPLOAD_KEYSTORE secret: the APK is signed with the debug key."
+            exit 0
+          fi
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/upload.keystore"
+          {
+            echo "ORG_GRADLE_PROJECT_CINEVAULT_UPLOAD_STORE_FILE=$RUNNER_TEMP/upload.keystore"
+            echo "ORG_GRADLE_PROJECT_CINEVAULT_UPLOAD_STORE_PASSWORD=$PASSWORD"
+            echo "ORG_GRADLE_PROJECT_CINEVAULT_UPLOAD_KEY_PASSWORD=$PASSWORD"
+            echo "ORG_GRADLE_PROJECT_CINEVAULT_UPLOAD_KEY_ALIAS=${ALIAS:-cinevault}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build
+        working-directory: apps/mobile/android
+        run: >-
+          ./gradlew assembleRelease --no-daemon
+          -PreactNativeArchitectures=${{ matrix.abis }}
+          -Pcinevault.versionCode=${{ env.BUILD_NUMBER }}
+
+      - name: Collect
+        id: apk
+        run: |
+          version=$(node -p "require('./apps/mobile/app.json').expo.version")
+          cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk "${{ matrix.file }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          {
+            echo "### ${{ matrix.file }} $version (build $BUILD_NUMBER, ${{ matrix.abis }})"
+            echo
+            echo "Size: $(du -h "${{ matrix.file }}" | cut -f1), SHA-256: \`$(sha256sum "${{ matrix.file }}" | cut -d' ' -f1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CineVault-${{ matrix.variant }}-${{ steps.apk.outputs.version }}-${{ github.run_number }}
+          path: ${{ matrix.file }}
+
+  smoke:
+    needs: apk
+    uses: ./.github/workflows/android-smoke.yml
+    with:
+      run-id: ${{ github.run_id }}
+
+  publish:
+    needs: apk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: CineVault-*-${{ github.run_number }}
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./apps/mobile/app.json').expo.version")
+          build=$(git rev-list --count HEAD)
+          gh release delete android-latest --cleanup-tag --yes || true
+          gh release create android-latest CineVault.apk CineVault-TV.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "CineVault voor Android $version (build $build)" \
+            --notes "Nieuwste build van \`${GITHUB_REF_NAME}\` (${GITHUB_SHA::7}). CineVault.apk voor telefoons, CineVault-TV.apk voor Android TV (en ook voor telefoons). Installeren: zie docs/android.md."

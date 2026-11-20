@@ -1,0 +1,534 @@
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+enum LibraryType {
+  MOVIES
+  SHOWS
+  /// Series (and the odd film) named like SHOWS; anime-style absolute numbering also works.
+  ANIME
+}
+
+enum MetadataStatus {
+  /// Not looked up yet.
+  PENDING
+  MATCHED
+  /// Looked up, nothing good enough found: needs a manual match.
+  UNMATCHED
+  /// The lookup itself failed (network, provider error); retried on the next scan.
+  FAILED
+}
+
+enum MediaType {
+  MOVIE
+  SHOW
+}
+
+enum RequestKind {
+  MOVIE
+  SHOW
+}
+
+enum RequestStatus {
+  /// Waits for an admin.
+  PENDING
+  /// In Radarr/Sonarr, which looks for it.
+  APPROVED
+  /// In the library.
+  AVAILABLE
+  DECLINED
+  /// Radarr/Sonarr refused it (see `reason`); an admin can approve it again.
+  FAILED
+}
+
+enum SubtitleSource {
+  EMBEDDED
+  EXTERNAL
+  OPENSUBTITLES
+  WHISPER
+}
+
+/// A member of the household: one account (and profile) per person.
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  /// Lower case, for logging in.
+  username      String    @unique
+  /// Name shown in the app ("Wie kijkt er?").
+  displayName   String    @default("")
+  /// Profile colour, e.g. "#E0B04F".
+  avatarColor   String?
+  /// "scrypt$N$r$p$salt$hash", see auth/password.ts.
+  passwordHash  String
+  role          Role      @default(USER)
+  /// A child's profile: only titles with an age rating up to this age (Kijkwijzer:
+  /// 0 is "AL"). Null: no limit. Titles without a rating are hidden from it.
+  maxAge        Int?
+  /// The secret in this person's calendar link (/api/calendar/<token>.ics); new = old link stops.
+  calendarToken String?   @unique
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  /// Which notifications this person wants: NotificationSettings from @cinevault/shared.
+  notificationSettings Json?
+  /// SkipSettings from @cinevault/shared: what the players skip by themselves for this
+  /// profile (intro, recap, credits, preview); null: nothing.
+  skipSettings         Json?
+
+  watchProgress     WatchProgress[]
+  sessions          Session[]
+  myList            MyListEntry[]
+  notifications     Notification[]
+  pushSubscriptions PushSubscription[]
+  requests          MediaRequestUser[]
+  trackPreferences  TrackPreference[]
+}
+
+/// A login on one device. The JWT carries its id, so logging out (or a new
+/// password) ends it at once.
+model Session {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt  DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Library {
+  id            String      @id @default(uuid()) @db.Uuid
+  name          String
+  type          LibraryType
+  /// Folder relative to MEDIA_ROOT, "/"-separated, e.g. "Movies".
+  path          String      @unique
+  lastScannedAt DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  items MediaItem[]
+}
+
+/// A movie or a show. Episodes of a show hang off Season.
+model MediaItem {
+  id                 String         @id @default(uuid()) @db.Uuid
+  libraryId          String         @db.Uuid
+  type               MediaType
+  /// Folder (show, movie) or file (loose movie) relative to MEDIA_ROOT.
+  path               String
+  title              String
+  sortTitle          String
+  originalTitle      String?
+  year               Int?
+  /// First release (movies) or first air date (shows), from the metadata provider.
+  releaseDate        DateTime?      @db.Date
+  overview           String?
+  tagline            String?
+  genres             String[]       @default([])
+  /// Average rating on a 0-10 scale, from the metadata provider.
+  rating             Float?
+  /// From which age (Kijkwijzer, else another country's rating; 0 is "AL"), from TMDB.
+  ageRating          Int?
+  /// The rating as given, e.g. "NL 12", "US PG-13".
+  certification      String?
+  /// Movie length, or typical episode length for shows.
+  runtimeMinutes     Int?
+  /// Show status as reported by the provider, e.g. "Ended".
+  status             String?
+  /// [{ name, character, profilePath, order }], top-billed cast.
+  cast               Json           @default("[]")
+  /// Image refs ("tmdb:w500/abc.jpg", "tvmaze:…", "media:Movies/X/poster.jpg"), see images.ts.
+  posterPath         String?
+  backdropPath       String?
+  /// The title as a picture (transparent PNG), from TMDB.
+  logoPath           String?
+  /// YouTube video id of the trailer, from TMDB.
+  trailerKey         String?
+  /// TMDB ids the provider recommends, for "Meer zoals dit" (matched to the library when asked).
+  recommendedTmdbIds Int[]          @default([])
+  /// Films: the TMDB collection it belongs to ("Harry Potter Collection"), its name in English.
+  collectionTmdbId   Int?
+  collectionName     String?
+  /// Shows: the next episode that has not aired yet ("Binnenkort").
+  nextEpisodeSeason  Int?
+  nextEpisodeNumber  Int?
+  nextEpisodeTitle   String?
+  nextEpisodeAirDate DateTime?      @db.Date
+  tmdbId             Int?
+  tvmazeId           Int?
+  tvdbId             Int?
+  imdbId             String?
+  metadataStatus     MetadataStatus @default(PENDING)
+  /// "tmdb" or "tvmaze".
+  metadataProvider   String?
+  metadataUpdatedAt  DateTime?
+  metadataError      String?
+  /// Set after a manual match correction so rescans don't overwrite it.
+  matchLocked        Boolean        @default(false)
+  /// When its newest file arrived (MediaFile.addedAt): "Nieuw toegevoegd" and the start page.
+  addedAt            DateTime?
+  /// The file whose intro (or part, themeStartMs) is the theme music, chosen by an admin; else the automatic choice.
+  themeFileId        String?        @db.Uuid
+  /// With themeFileId: the theme is that file from here (an admin's choice of any part, also for films).
+  themeStartMs       Int?
+  /// No theme music on the detail page (an admin's choice).
+  themeOff           Boolean        @default(false)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  library          Library            @relation(fields: [libraryId], references: [id], onDelete: Cascade)
+  seasons          Season[]
+  /// Files of a movie. Episode files are linked via Episode.
+  files            MediaFile[]
+  myList           MyListEntry[]
+  trackPreferences TrackPreference[]
+  /// Shows: the air dates of recent and coming episodes, also those not on disk ("Kalender").
+  schedule         ScheduledEpisode[]
+
+  @@unique([libraryId, path])
+  @@index([type])
+  @@index([tmdbId])
+  @@index([addedAt])
+  @@index([metadataStatus])
+  @@index([collectionTmdbId])
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin, map: "MediaItem_title_trgm_idx")
+}
+
+model Season {
+  id           String   @id @default(uuid()) @db.Uuid
+  mediaItemId  String   @db.Uuid
+  seasonNumber Int
+  title        String?
+  overview     String?
+  posterPath   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  mediaItem MediaItem @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
+  episodes  Episode[]
+
+  @@unique([mediaItemId, seasonNumber])
+}
+
+model Episode {
+  id             String    @id @default(uuid()) @db.Uuid
+  seasonId       String    @db.Uuid
+  episodeNumber  Int
+  /// Anime-style absolute number, when known.
+  absoluteNumber Int?
+  runtimeMinutes Int?
+  title          String?
+  overview       String?
+  airDate        DateTime? @db.Date
+  stillPath      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  season Season      @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  files  MediaFile[]
+
+  @@unique([seasonId, episodeNumber])
+}
+
+/// A playable file on disk, with what ffprobe found in it.
+/// Belongs to either a movie (mediaItemId) or an episode (episodeId).
+model MediaFile {
+  id               String    @id @default(uuid()) @db.Uuid
+  mediaItemId      String?   @db.Uuid
+  episodeId        String?   @db.Uuid
+  /// File relative to MEDIA_ROOT, "/"-separated.
+  path             String    @unique
+  size             BigInt
+  /// File mtime, used for incremental rescans.
+  modifiedAt       DateTime
+  container        String?
+  videoCodec       String?
+  width            Int?
+  height           Int?
+  bitDepth         Int?
+  /// "HDR10", "HLG" or "DV"; null for SDR.
+  hdrFormat        String?
+  /// Dolby Vision profile (5, 7, 8 …) and its base-layer compatibility (1: HDR10, 4: HLG …).
+  dvProfile        Int?
+  dvCompatibility  Int?
+  durationMs       Int?
+  bitrate          Int?
+  /// AudioTrack[] from @cinevault/shared
+  audioTracks      Json      @default("[]")
+  /// SubtitleTrack[] from @cinevault/shared
+  subtitleTracks   Json      @default("[]")
+  probedAt         DateTime?
+  /// Set when ffprobe failed; the file is retried when it changes.
+  probeError       String?
+  /// Skip Intro (episodes): where the intro starts and ends, when one was found.
+  introStartMs     Int?
+  introEndMs       Int?
+  /// "chapter", "aniskip" (anime, from AniSkip), "audio" (fingerprints of the season)
+  /// or "manual" (set by an admin).
+  introSource      String?
+  /// When the intro was looked for; null: not yet (or again, after a change).
+  introCheckedAt   DateTime?
+  /// The end credits, the same way: the next episode can start from here. Films too, from
+  /// the picture ("picture"): from here they count as watched.
+  creditsStartMs   Int?
+  creditsEndMs     Int?
+  creditsSource    String?
+  creditsCheckedAt DateTime?
+  /// Films (source "picture"): the parts of the credits after the first, each after a
+  /// scene (a mid-credits scene), as [{ startMs, endMs }]; null when there is one part.
+  creditsMore      Json?
+  /// The recap ("Previously on…", episodes), the same way: from AniSkip, a chapter, or the
+  /// clips of the episode before that it plays near the start ("audio").
+  recapStartMs     Int?
+  recapEndMs       Int?
+  recapSource      String?
+  recapCheckedAt   DateTime?
+  /// The "next time on…" preview of the next episode (episodes): in this one's last part,
+  /// from a chapter or the clips of the next episode it plays ("audio"). The credits end
+  /// where it starts.
+  previewStartMs   Int?
+  previewEndMs     Int?
+  previewSource    String?
+  previewCheckedAt DateTime?
+  /// How sure the search is of each part, 0-1 (null: set by hand, or found before
+  /// 2026-11-13). Under 0.5 the players don't show it; Beheer does.
+  introConfidence   Float?
+  creditsConfidence Float?
+  recapConfidence   Float?
+  previewConfidence Float?
+  /// When AniSkip was last asked (anime), or found not to know this file's show.
+  aniskipCheckedAt DateTime?
+  /// When the file arrived: its mtime, or when the scanner first saw it if that is earlier.
+  /// Kept when the file changes (an upgrade in place is not new).
+  addedAt          DateTime  @default(now())
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  mediaItem     MediaItem?      @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
+  episode       Episode?        @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  subtitles     Subtitle[]
+  watchProgress WatchProgress[]
+
+  @@index([mediaItemId])
+  @@index([episodeId])
+  @@index([addedAt])
+}
+
+/// A subtitle available for a file, converted to WebVTT and cached locally.
+model Subtitle {
+  id              String         @id @default(uuid()) @db.Uuid
+  mediaFileId     String         @db.Uuid
+  /// ISO 639-2 language code, e.g. "nld" or "eng".
+  language        String
+  label           String?
+  source          SubtitleSource
+  /// Stream index for EMBEDDED subtitles.
+  streamIndex     Int?
+  /// Identifies the subtitle within its source: the stream index (EMBEDDED),
+  /// the sidecar file relative to MEDIA_ROOT (EXTERNAL) or the provider's file id.
+  externalId      String
+  /// Cached .vtt relative to CACHE_DIR; for EXTERNAL the sidecar ("media:…").
+  /// Empty for an embedded track that hasn't been read completely yet.
+  path            String?
+  offsetMs        Int            @default(0)
+  forced          Boolean        @default(false)
+  hearingImpaired Boolean        @default(false)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  mediaFile MediaFile @relation(fields: [mediaFileId], references: [id], onDelete: Cascade)
+
+  @@unique([mediaFileId, source, externalId])
+  @@index([mediaFileId])
+}
+
+model WatchProgress {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  mediaFileId String   @db.Uuid
+  positionMs  Int      @default(0)
+  durationMs  Int?
+  completed   Boolean  @default(false)
+  updatedAt   DateTime @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaFile MediaFile @relation(fields: [mediaFileId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, mediaFileId])
+  @@index([userId, updatedAt])
+}
+
+/// "Mijn lijst": titles a person keeps to watch later. A show in it is followed:
+/// new episodes give a notification.
+model MyListEntry {
+  userId      String   @db.Uuid
+  mediaItemId String   @db.Uuid
+  addedAt     DateTime @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaItem MediaItem @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
+
+  @@id([userId, mediaItemId])
+  @@index([userId, addedAt])
+}
+
+/// The audio and subtitles a profile chose for a show (or movie), so the next
+/// episode starts the same way, on every device.
+model TrackPreference {
+  userId        String   @db.Uuid
+  mediaItemId   String   @db.Uuid
+  /// ISO 639-2 language of the chosen audio ("jpn"); null: the file's default track.
+  audioLanguage String?
+  /// "off", or the ISO 639-2 language of the chosen subtitle; null: the automatic choice.
+  subtitle      String?
+  updatedAt     DateTime @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaItem MediaItem @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
+
+  @@id([userId, mediaItemId])
+}
+
+/// A notification for one person: in the app's inbox, and as a push message
+/// (web push, the Android app) once it may be delivered.
+model Notification {
+  /// Increasing, so apps can ask for what is newer than the last one they saw.
+  id        Int       @id @default(autoincrement())
+  userId    String    @db.Uuid
+  /// NotificationType from @cinevault/shared, e.g. "new-episodes".
+  type      String
+  title     String
+  body      String
+  /// What a tap opens: a title, or a file to play.
+  itemId    String?   @db.Uuid
+  fileId    String?   @db.Uuid
+  /// A web path for other cases, e.g. "/admin".
+  path      String?
+  /// Unique per person: the same event never notifies twice.
+  key       String
+  createdAt DateTime  @default(now())
+  /// Not before this: notifications made during quiet hours wait for the morning.
+  deliverAt DateTime  @default(now())
+  readAt    DateTime?
+  /// When web push sent it; null: not yet (or not needed).
+  pushedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+  @@index([userId, id])
+  @@index([pushedAt, deliverAt])
+}
+
+/// A browser that receives web push for a person (needs HTTPS).
+model PushSubscription {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  endpoint   String   @unique
+  p256dh     String
+  auth       String
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Things the server keeps for itself, such as its web push (VAPID) keys.
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+/// "Verzoeken": a title someone asked for, once per title (others who ask join it).
+model MediaRequest {
+  id          String        @id @default(uuid()) @db.Uuid
+  kind        RequestKind
+  tmdbId      Int
+  title       String
+  year        Int?
+  overview    String?
+  /// Image ref ("tmdb:w342/…"), see images.ts.
+  posterPath  String?
+  /// Shows: Sonarr files it as anime (absolute numbers, the Anime folder).
+  anime       Boolean       @default(false)
+  /// Shows: seasons asked for as a whole (TMDB's numbers). Empty, without episodes: the whole show.
+  seasons     Int[]         @default([])
+  /// Shows, a part of one: every episode it covers (also those of whole seasons, as TMDB
+  /// numbers them, with the air date): [{ seasonNumber, episodeNumber, airDate? }]. Null: the whole show.
+  episodes    Json?
+  status      RequestStatus @default(PENDING)
+  /// Why it was declined, or what Radarr/Sonarr said.
+  reason      String?
+  decidedAt   DateTime?
+  decidedBy   String?
+  availableAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  requesters MediaRequestUser[]
+
+  /// More than one per show: parts (seasons, episodes) asked for at different times.
+  @@index([kind, tmdbId])
+  @@index([status])
+}
+
+/// Who asked for a title; they hear when it is approved, declined or here.
+model MediaRequestUser {
+  requestId String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  request MediaRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([requestId, userId])
+}
+
+/// An episode's air date as TMDB or TVmaze have it, for the calendar: the
+/// recent and coming episodes of a show, whether the file is there or not.
+/// Replaced each time the show's metadata is refreshed.
+model ScheduledEpisode {
+  id            String    @id @default(uuid()) @db.Uuid
+  mediaItemId   String    @db.Uuid
+  mediaItem     MediaItem @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
+  seasonNumber  Int
+  episodeNumber Int
+  title         String?
+  overview      String?
+  airDate       DateTime  @db.Date
+
+  @@unique([mediaItemId, seasonNumber, episodeNumber])
+  @@index([airDate])
+}
+
+/// A collection of films at TMDB, for "Collecties": its parts in the order they came out,
+/// also those not in the library (to ask for). Fetched when a film of it is there, weekly again.
+model Collection {
+  tmdbId       Int      @id
+  name         String
+  overview     String?
+  posterPath   String?
+  backdropPath String?
+  /// [{ tmdbId, title, releaseDate?, year?, posterRef? }]
+  parts        Json     @default("[]")
+  fetchedAt    DateTime @default(now())
+}

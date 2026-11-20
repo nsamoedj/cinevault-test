@@ -1,0 +1,75 @@
+{
+  "expo": {
+    "name": "CineVault",
+    "slug": "cinevault",
+    "version": "0.1.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "scheme": "cinevault",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0A1230",
+    "android": {
+      "package": "nl.cinevault.app",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-foreground.png",
+        "monochromeImage": "./assets/adaptive-monochrome.png",
+        "backgroundColor": "#101C3D"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0A1230",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 160
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true,
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "extraProguardRules": "# WorkManager (expo-background-task) creates its Room database WorkDatabase_Impl\n# by name at start; minified away, the app crashed before the first screen.\n-keep class * extends androidx.room.RoomDatabase { *; }\n# expo-video reads DrivingGate.videoAllowed through reflection (patches/expo-video@58.0.11.patch).\n-keep class nl.cinevault.media.DrivingGate { *; }"
+          }
+        }
+      ],
+      [
+        "expo-video",
+        {
+          "supportsPictureInPicture": true,
+          "supportsBackgroundPlayback": false
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/adaptive-monochrome.png",
+          "color": "#E0B04F"
+        }
+      ],
+      "expo-background-task",
+      [
+        "react-native-google-cast",
+        {
+          "receiverAppId": "CC1AD845",
+          "expandedController": false,
+          "androidPlayServicesCastFrameworkVersion": "22.+"
+        }
+      ],
+      "./plugins/withAndroidRelease",
+      "./plugins/withAndroidTV",
+      "./plugins/withAndroidAutomotive"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}

@@ -1,0 +1,2 @@
+# shellcheck -x scripts/*.sh: follow scripts/lib/*.sh relative to the script.
+source-path=SCRIPTDIR

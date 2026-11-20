@@ -1,0 +1,204 @@
+# Smoke test of the Android app: starts it (CineVault-x86.apk, the same code
+# as CineVault.apk) on a phone and a TV emulator
+# against the browser tests' API server (apps/web/e2e/api-server.ts), logs in
+# and opens a few screens (apps/mobile/e2e/). The device log, and so the cause
+# of a crash, is in the job log and in the artifact smoke-<run>-<device>; the
+# screenshots are in the pre-release "tv-screens".
+#
+# Called by android.yml after a build, or on its own (a change to the test
+# itself, or by hand) with the newest successful build of this branch.
+
+name: Android smoke test
+
+on:
+  workflow_call:
+    inputs:
+      run-id:
+        description: The Android run whose APK to test
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: The Android run whose APK to test (empty is the newest successful one)
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # A phone: connects, logs in, opens a few screens.
+          - device: phone
+            target: google_apis
+            arch: x86_64
+            profile: ''
+            flow: apps/mobile/e2e/smoke.yaml
+          # A 1080p TV: the TV screens, with screenshots (tv-screens).
+          - device: tv
+            target: android-tv
+            arch: x86
+            profile: tv_1080p
+            flow: apps/mobile/e2e/tv.yaml
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cinevault
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: cinevault_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cinevault -d cinevault_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      E2E_DATABASE_URL: postgresql://cinevault:devpass@localhost:5432/cinevault_e2e
+      # The demo library: titles with posters, backdrops and seasons.
+      E2E_DEMO: '1'
+      OUT: ${{ github.workspace }}/smoke-output
+    steps:
+      - uses: actions/checkout@v5
+
+      # The emulator's userdata partition needs more room than the runner has
+      # free; the preinstalled toolchains below are not used here.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost \
+            /usr/local/lib/android/sdk/ndk /opt/hostedtoolcache/CodeQL /usr/share/swift \
+            /usr/local/share/powershell /usr/local/julia* || true
+          df -h /
+
+      # Called by android.yml: the APK of this same run.
+      - if: inputs.run-id == github.run_id
+        uses: actions/download-artifact@v4
+        with:
+          pattern: CineVault-smoke-*
+          merge-multiple: true
+
+      - name: APK of another run
+        if: inputs.run-id != github.run_id
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run-id }}
+        run: |
+          # The newest run with a smoke build: a run whose smoke test failed
+          # still has one, so "--status success" would skip it.
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+              -q '[.artifacts[] | select(.name | startswith("CineVault-smoke-")) | select(.expired | not)
+                  | select(.workflow_run.head_branch == env.GITHUB_REF_NAME)] | .[0].workflow_run.id')
+          fi
+          echo "Testing the APK of run $RUN_ID"
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'CineVault-smoke-*' --dir "$RUNNER_TEMP/apk"
+          find "$RUNNER_TEMP/apk" -name CineVault-x86.apk -exec cp {} . \;
+          ls -l CineVault-x86.apk
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq ffmpeg
+          pnpm install --frozen-lockfile
+          pnpm --filter @cinevault/shared build
+          curl -fsSL https://get.maestro.mobile.dev | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+          mkdir -p "$OUT"
+
+      - name: API server
+        working-directory: apps/web
+        run: |
+          nohup npx tsx e2e/api-server.ts > "$OUT/api.log" 2>&1 &
+          for i in $(seq 1 90); do
+            curl -fs http://127.0.0.1:3100/api/health > /dev/null && break
+            sleep 2
+          done
+          curl -fsS -X POST http://127.0.0.1:3100/api/auth/setup \
+            -H 'Content-Type: application/json' \
+            -d '{"displayName":"Tester","username":"tester","password":"e2e-wachtwoord-123"}' > /dev/null
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # The x86 build of the app (x86_64 and x86): the same code as CineVault.apk.
+      - name: Emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: ${{ matrix.arch }}
+          target: ${{ matrix.target }}
+          profile: ${{ matrix.profile }}
+          ram-size: 4096M
+          disk-size: 3072M
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: bash .github/scripts/android-smoke.sh CineVault-x86.apk "$OUT" ${{ matrix.flow }}
+
+      - name: API log
+        if: always()
+        run: tail -50 "$OUT/api.log" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-${{ github.run_id }}-${{ matrix.device }}
+          path: smoke-output
+
+  # The screenshots as the pre-release "tv-screens", to look at without
+  # unpacking an artifact.
+  screens:
+    needs: smoke
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smoke-${{ github.run_id }}-*
+          path: out
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Named after the device (the flows' own shots, and failure.png).
+          mkdir shots
+          for dir in out/smoke-*; do
+            device=${dir##*-}
+            for png in "$dir"/*.png; do
+              [ -f "$png" ] || continue
+              name=$(basename "$png")
+              case "$name" in "$device"-*|tv-*|smoke-*) ;; *) name="$device-$name" ;; esac
+              cp "$png" "shots/$name"
+            done
+          done
+          shots=$(find shots -name '*.png' | sort)
+          [ -n "$shots" ] || { echo "No screenshots."; exit 0; }
+          gh release delete tv-screens --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create tv-screens $shots --repo "$GITHUB_REPOSITORY" --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Schermafbeeldingen van de rooktest (${GITHUB_SHA::7})" \
+            --notes "Telefoon en Android TV (1080p) op een emulator, met de demobibliotheek. Gemaakt door android-smoke.yml."
